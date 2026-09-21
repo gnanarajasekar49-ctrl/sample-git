@@ -52,3 +52,4 @@ networks:
 volumes:
   customer-db-prod-data:
     name: customer-db-prod-data
+

@@ -52,3 +52,4 @@ networks:
 volumes:
   customer-db-dev-data:
     name: customer-db-dev-data
+

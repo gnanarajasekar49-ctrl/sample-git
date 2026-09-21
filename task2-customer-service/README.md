@@ -20,3 +20,4 @@ This service demonstrates automated multi-environment deployment (DEV, UAT, and 
 6. **[Check 23]** Application can reach the database (`/api/db-status`).
 7. **[Check 24]** Expected environment value is displayed by application.
 8. **[Check 25]** Deployed version matches requested version.
+

@@ -52,3 +52,4 @@ networks:
 volumes:
   customer-db-uat-data:
     name: customer-db-uat-data
+

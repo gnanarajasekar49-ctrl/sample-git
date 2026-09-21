@@ -1,0 +1,11 @@
+{
+  "name": "orders-api",
+  "version": "7.8.0",
+  "description": "Orders API Microservice with Blue-Green Zero Downtime Deployment",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node tests/orders.test.js"
+  }
+}
+

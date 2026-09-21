@@ -8,3 +8,4 @@ powershell -ExecutionPolicy Bypass -File "scripts\run-all-tasks.ps1"
 echo ================================================================================
 echo Finished execution. Press any key to exit...
 pause >nul
+

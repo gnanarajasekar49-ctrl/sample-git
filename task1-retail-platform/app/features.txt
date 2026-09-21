@@ -1,2 +1,1 @@
 Feature 1: Product catalogue filtering
-Feature 2: User cart discount summary

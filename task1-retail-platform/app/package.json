@@ -1,0 +1,10 @@
+{
+  "name": "retail-platform",
+  "version": "4.2.0",
+  "description": "Retail Platform Service with Health and Payment Gateways",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test.js"
+  }
+}

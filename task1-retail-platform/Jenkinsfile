@@ -1,0 +1,264 @@
+pipeline {
+    agent any
+
+    parameters {
+        choice(name: 'DEPLOYMENT_ACTION', choices: ['DEPLOY', 'ROLLBACK'], description: 'Select deployment action')
+        choice(name: 'ENVIRONMENT', choices: ['UAT', 'PRODUCTION'], description: 'Select target environment')
+        string(name: 'VERSION', defaultValue: '4.2.1', description: 'Enter application version / release tag to deploy')
+        choice(name: 'CONFIRM_PROD', choices: ['NO', 'YES'], description: 'Mandatory safety confirmation required for PRODUCTION deployments')
+    }
+
+    environment {
+        APP_NAME = 'retail-app'
+        APP_PORT = '8081'
+        NETWORK_NAME = 'retail-network'
+        PREVIOUS_IMAGE = ''
+        GIT_COMMIT_SHA = ''
+        HEALTH_CHECK_MAX_RETRIES = '6'
+        HEALTH_CHECK_DELAY = '5'
+    }
+
+    stages {
+        stage('Safety & Parameter Validation') {
+            steps {
+                script {
+                    echo "=================================================="
+                    echo "  INITIATING DEPLOYMENT PIPELINE FOR ${APP_NAME}"
+                    echo "=================================================="
+                    echo "Action:       ${params.DEPLOYMENT_ACTION}"
+                    echo "Environment:  ${params.ENVIRONMENT}"
+                    echo "Version:      ${params.VERSION}"
+                    echo "Confirm Prod: ${params.CONFIRM_PROD}"
+
+                    if (params.ENVIRONMENT == 'PRODUCTION' && params.CONFIRM_PROD != 'YES') {
+                        error("DEPLOYMENT BLOCKED: Production deployment requested without explicit CONFIRM_PROD=YES!")
+                    }
+
+                    if (!params.VERSION || params.VERSION.trim() == '') {
+                        error("DEPLOYMENT BLOCKED: Version parameter cannot be empty.")
+                    }
+                }
+            }
+        }
+
+        stage('Checkout & Version Traceability') {
+            steps {
+                script {
+                    // Identify Git Commit SHA
+                    if (isUnix()) {
+                        env.GIT_COMMIT_SHA = sh(script: "git rev-parse HEAD", returnStdout: true).trim()
+                    } else {
+                        env.GIT_COMMIT_SHA = bat(script: "@git rev-parse HEAD", returnStdout: true).trim()
+                    }
+                    echo "Selected Git Commit SHA: ${env.GIT_COMMIT_SHA}"
+                    echo "Validating requested version tag: v${params.VERSION}..."
+                }
+            }
+        }
+
+        stage('Run Unit & Regression Tests') {
+            steps {
+                script {
+                    echo "Executing automated test suite..."
+                    if (isUnix()) {
+                        sh "node tests/app.test.js"
+                    } else {
+                        bat "node tests/app.test.js"
+                    }
+                }
+            }
+        }
+
+        stage('Record Previous Production State') {
+            steps {
+                script {
+                    echo "--- Recording existing production container state ---"
+                    def getPrevImageCmd = "docker inspect --format='{{.Config.Image}}' ${APP_NAME}-prod 2>/dev/null || echo 'NONE'"
+                    if (!isUnix()) {
+                        getPrevImageCmd = "@docker inspect --format=\"{{.Config.Image}}\" ${APP_NAME}-prod 2>nul || @echo NONE"
+                        env.PREVIOUS_IMAGE = bat(script: getPrevImageCmd, returnStdout: true).trim()
+                    } else {
+                        env.PREVIOUS_IMAGE = sh(script: getPrevImageCmd, returnStdout: true).trim()
+                    }
+
+                    if (env.PREVIOUS_IMAGE == 'NONE' || env.PREVIOUS_IMAGE == '') {
+                        env.PREVIOUS_IMAGE = "${APP_NAME}:4.2.0"
+                    }
+                    echo "Previous Active Image Recorded: ${env.PREVIOUS_IMAGE}"
+                }
+            }
+        }
+
+        stage('Docker Build & Package') {
+            when {
+                expression { params.DEPLOYMENT_ACTION == 'DEPLOY' }
+            }
+            steps {
+                script {
+                    echo "Building Docker Image: ${APP_NAME}:${params.VERSION}..."
+                    if (isUnix()) {
+                        sh "docker network create ${NETWORK_NAME} 2>/dev/null || true"
+                        sh "docker build --build-arg APP_VERSION=${params.VERSION} -t ${APP_NAME}:${params.VERSION} ."
+                    } else {
+                        bat "@docker network create ${NETWORK_NAME} 2>nul || exit /b 0"
+                        bat "docker build -t ${APP_NAME}:${params.VERSION} ."
+                    }
+                    echo "Docker image ${APP_NAME}:${params.VERSION} built successfully."
+                }
+            }
+        }
+
+        stage('Deploy Candidate & Health Validation') {
+            steps {
+                script {
+                    def targetImage = (params.DEPLOYMENT_ACTION == 'ROLLBACK') ? env.PREVIOUS_IMAGE : "${APP_NAME}:${params.VERSION}"
+                    def candidateContainer = "${APP_NAME}-candidate"
+                    def prodContainer = "${APP_NAME}-prod"
+                    def candidatePort = "8089"
+
+                    echo "=========================================================="
+                    echo "  DEPLOYING CANDIDATE: ${targetImage}"
+                    echo "=========================================================="
+
+                    try {
+                        // Start new version on temporary port before removing old version
+                        echo "Starting candidate container (${candidateContainer}) alongside production..."
+                        if (isUnix()) {
+                            sh "docker rm -f ${candidateContainer} 2>/dev/null || true"
+                            sh """
+                                docker run -d --name ${candidateContainer} \
+                                  --network ${NETWORK_NAME} \
+                                  -p ${candidatePort}:8081 \
+                                  -e APP_VERSION=${params.VERSION} \
+                                  -e NODE_ENV=${params.ENVIRONMENT.toLowerCase()} \
+                                  -e GIT_COMMIT=${env.GIT_COMMIT_SHA} \
+                                  ${targetImage}
+                            """
+                        } else {
+                            bat "@docker rm -f ${candidateContainer} 2>nul || exit /b 0"
+                            bat """
+                                docker run -d --name ${candidateContainer} --network ${NETWORK_NAME} -p ${candidatePort}:8081 -e APP_VERSION=${params.VERSION} -e NODE_ENV=${params.ENVIRONMENT.toLowerCase()} -e GIT_COMMIT=${env.GIT_COMMIT_SHA} ${targetImage}
+                            """
+                        }
+
+                        echo "Performing application health check on http://localhost:${candidatePort}/health..."
+                        def isHealthy = false
+                        for (int i = 1; i <= 6; i++) {
+                            echo "Health check attempt ${i}/6..."
+                            def checkCmd = isUnix() ? "curl -s -f http://localhost:${candidatePort}/health" : "curl.exe -s -f http://localhost:${candidatePort}/health"
+                            try {
+                                if (isUnix()) {
+                                    sh checkCmd
+                                } else {
+                                    bat "@${checkCmd}"
+                                }
+                                isHealthy = true
+                                echo "Health check PASSED on attempt ${i}!"
+                                break
+                            } catch (Exception hcEx) {
+                                echo "Health check not yet ready. Waiting 3 seconds..."
+                                sleep(3)
+                            }
+                        }
+
+                        if (!isHealthy) {
+                            throw new RuntimeException("Health check failed for candidate ${targetImage}!")
+                        }
+
+                        // Traffic switch: Replace old container with validated new container
+                        echo "Health check succeeded! Promoting candidate to active production container..."
+                        if (isUnix()) {
+                            sh "docker stop ${prodContainer} 2>/dev/null || true"
+                            sh "docker rm ${prodContainer} 2>/dev/null || true"
+                            sh "docker stop ${candidateContainer}"
+                            sh "docker rm ${candidateContainer}"
+                            sh """
+                                docker run -d --name ${prodContainer} \
+                                  --network ${NETWORK_NAME} \
+                                  -p ${APP_PORT}:8081 \
+                                  --restart unless-stopped \
+                                  -e APP_VERSION=${params.VERSION} \
+                                  -e NODE_ENV=${params.ENVIRONMENT.toLowerCase()} \
+                                  -e GIT_COMMIT=${env.GIT_COMMIT_SHA} \
+                                  ${targetImage}
+                            """
+                        } else {
+                            bat "@docker stop ${prodContainer} 2>nul || exit /b 0"
+                            bat "@docker rm ${prodContainer} 2>nul || exit /b 0"
+                            bat "docker stop ${candidateContainer}"
+                            bat "docker rm ${candidateContainer}"
+                            bat """
+                                docker run -d --name ${prodContainer} --network ${NETWORK_NAME} -p ${APP_PORT}:8081 --restart unless-stopped -e APP_VERSION=${params.VERSION} -e NODE_ENV=${params.ENVIRONMENT.toLowerCase()} -e GIT_COMMIT=${env.GIT_COMMIT_SHA} ${targetImage}
+                            """
+                        }
+
+                        echo "=========================================================="
+                        echo "  DEPLOYMENT SUCCESSFUL"
+                        echo "  Old Version:  ${env.PREVIOUS_IMAGE}"
+                        echo "  New Version:  ${targetImage}"
+                        echo "  Final State:  ACTIVE ON PORT ${APP_PORT}"
+                        echo "=========================================================="
+
+                    } catch (Exception ex) {
+                        echo "**********************************************************"
+                        echo "  CRITICAL: CANDIDATE HEALTH CHECK FAILED!"
+                        echo "  INITIATING AUTOMATIC ROLLBACK TO: ${env.PREVIOUS_IMAGE}"
+                        echo "**********************************************************"
+
+                        // Cleanup failed candidate
+                        if (isUnix()) {
+                            sh "docker stop ${candidateContainer} 2>/dev/null || true"
+                            sh "docker rm ${candidateContainer} 2>/dev/null || true"
+                        } else {
+                            bat "@docker stop ${candidateContainer} 2>nul || exit /b 0"
+                            bat "@docker rm ${candidateContainer} 2>nul || exit /b 0"
+                        }
+
+                        // Ensure previous production container is restored and running
+                        echo "Verifying previous version (${env.PREVIOUS_IMAGE}) is running on port ${APP_PORT}..."
+                        if (isUnix()) {
+                            sh """
+                                docker inspect ${prodContainer} >/dev/null 2>&1 || \
+                                docker run -d --name ${prodContainer} --network ${NETWORK_NAME} -p ${APP_PORT}:8081 --restart unless-stopped ${env.PREVIOUS_IMAGE}
+                            """
+                        } else {
+                            bat """
+                                @docker inspect ${prodContainer} >nul 2>&1 || docker run -d --name ${prodContainer} --network ${NETWORK_NAME} -p ${APP_PORT}:8081 --restart unless-stopped ${env.PREVIOUS_IMAGE}
+                            """
+                        }
+
+                        echo "=========================================================="
+                        echo "  ROLLBACK VERIFIED & COMPLETE"
+                        echo "  Attempted Version: ${targetImage} (FAILED)"
+                        echo "  Active Restored:   ${env.PREVIOUS_IMAGE}"
+                        echo "  Final State:       RESTORED TO SAFE STATE"
+                        echo "=========================================================="
+
+                        // Mark Jenkins pipeline as FAILED because rollback was required
+                        currentBuild.result = 'FAILURE'
+                        error("Deployment of ${targetImage} failed health validation. Automatic rollback executed.")
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            script {
+                echo "--- Post-Execution Container Status ---"
+                if (isUnix()) {
+                    sh "docker ps -a --filter name=${APP_NAME}"
+                } else {
+                    bat "@docker ps -a --filter name=${APP_NAME}"
+                }
+            }
+        }
+        success {
+            echo "Pipeline finished with SUCCESS."
+        }
+        failure {
+            echo "Pipeline finished with FAILURE - Release protection engaged."
+        }
+    }
+}

@@ -27,3 +27,4 @@ networks:
   retail-network:
     name: retail-network
     driver: bridge
+

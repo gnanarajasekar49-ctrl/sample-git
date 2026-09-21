@@ -19,3 +19,4 @@ This service represents the online retail platform. It implements version tracki
 - `v4.2.0` - Initial production release with payment gateway defect.
 - `v4.2.1` - Emergency hotfix release resolving payment issue.
 - `v4.2.2` - Injected failure version (simulates healthcheck failure to trigger automated rollback).
+

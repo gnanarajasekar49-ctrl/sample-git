@@ -1,1 +1,1 @@
-Consolidated implementation: Hotfix fix merged with Feature Branch functionality
+Feature Branch implementation of payment engine

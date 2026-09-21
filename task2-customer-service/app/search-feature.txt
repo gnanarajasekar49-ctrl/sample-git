@@ -1,3 +1,1 @@
 Commit 1: Implement basic customer keyword filtering
-Commit 2: Add customer tier filter and sorting
-Commit 3: Add in-memory query cache for high throughput

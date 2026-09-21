@@ -1,0 +1,54 @@
+version: '3.8'
+
+services:
+  customer-db-uat:
+    image: postgres:15-alpine
+    container_name: customer-db-uat
+    environment:
+      POSTGRES_USER: uat_user
+      POSTGRES_PASSWORD: uat_secure_password_456
+      POSTGRES_DB: customer_uat_db
+    volumes:
+      - customer-db-uat-data:/var/lib/postgresql/data
+    networks:
+      - customer-uat-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U uat_user -d customer_uat_db"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  customer-app-uat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: customer-app:${VERSION:-5.0.0}
+    container_name: customer-app-uat
+    ports:
+      - "8082:8082"
+    environment:
+      - NODE_ENV=staging
+      - ENVIRONMENT=UAT
+      - PORT=8082
+      - APP_VERSION=${VERSION:-5.0.0}
+      - DB_HOST=customer-db-uat
+      - DB_PORT=5432
+      - DB_USER=uat_user
+      - DB_PASSWORD=uat_secure_password_456
+      - DB_NAME=customer_uat_db
+    depends_on:
+      customer-db-uat:
+        condition: service_healthy
+    networks:
+      - customer-uat-net
+    restart: unless-stopped
+
+networks:
+  customer-uat-net:
+    name: customer-uat-net
+    driver: bridge
+
+volumes:
+  customer-db-uat-data:
+    name: customer-db-uat-data

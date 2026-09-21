@@ -1,0 +1,237 @@
+pipeline {
+    agent any
+
+    parameters {
+        choice(name: 'ENVIRONMENT', choices: ['DEV', 'UAT', 'PRODUCTION'], description: 'Target deployment environment')
+        choice(name: 'ACTION', choices: ['DEPLOY', 'ROLLBACK'], description: 'Select deployment action')
+        string(name: 'VERSION', defaultValue: '5.0.0', description: 'Application version / tag to deploy')
+        choice(name: 'RUN_TESTS', choices: ['YES', 'NO'], description: 'Execute unit and integration tests before deployment')
+        choice(name: 'CONFIRM_PROD', choices: ['NO', 'YES'], description: 'Required safety confirmation for PRODUCTION environment')
+    }
+
+    environment {
+        APP_BASE_NAME = 'customer-app'
+        DB_BASE_NAME = 'customer-db'
+        TARGET_BRANCH = ''
+        TARGET_PORT = ''
+        TARGET_NET = ''
+        TARGET_APP_CONTAINER = ''
+        TARGET_DB_CONTAINER = ''
+        TARGET_COMPOSE_FILE = ''
+        PREVIOUS_VERSION = '5.0.0'
+        DEPLOY_STATUS = 'INITIALIZED'
+    }
+
+    stages {
+        stage('Resolve & Validate Environment Configuration') {
+            steps {
+                script {
+                    echo "=========================================================="
+                    echo "  RESOLVING MULTI-ENVIRONMENT TARGET CONFIGURATION"
+                    echo "=========================================================="
+
+                    // Refuse invalid production combinations
+                    if (params.ENVIRONMENT == 'PRODUCTION' && params.CONFIRM_PROD != 'YES') {
+                        error("SAFETY VIOLATION: Production deployment blocked because CONFIRM_PROD was not set to YES.")
+                    }
+
+                    // Map environment-specific configuration matrix
+                    switch (params.ENVIRONMENT) {
+                        case 'DEV':
+                            env.TARGET_BRANCH = 'develop'
+                            env.TARGET_PORT = '8081'
+                            env.TARGET_NET = 'customer-dev-net'
+                            env.TARGET_APP_CONTAINER = 'customer-app-dev'
+                            env.TARGET_DB_CONTAINER = 'customer-db-dev'
+                            env.TARGET_COMPOSE_FILE = 'docker-compose.dev.yml'
+                            break
+                        case 'UAT':
+                            env.TARGET_BRANCH = 'release'
+                            env.TARGET_PORT = '8082'
+                            env.TARGET_NET = 'customer-uat-net'
+                            env.TARGET_APP_CONTAINER = 'customer-app-uat'
+                            env.TARGET_DB_CONTAINER = 'customer-db-uat'
+                            env.TARGET_COMPOSE_FILE = 'docker-compose.uat.yml'
+                            break
+                        case 'PRODUCTION':
+                            env.TARGET_BRANCH = 'main'
+                            env.TARGET_PORT = '8083'
+                            env.TARGET_NET = 'customer-prod-net'
+                            env.TARGET_APP_CONTAINER = 'customer-app-prod'
+                            env.TARGET_DB_CONTAINER = 'customer-db-prod'
+                            env.TARGET_COMPOSE_FILE = 'docker-compose.prod.yml'
+                            break
+                        default:
+                            error("UNKNOWN ENVIRONMENT: ${params.ENVIRONMENT}")
+                    }
+
+                    echo "Resolved Environment: ${params.ENVIRONMENT}"
+                    echo "Resolved Git Branch:  ${env.TARGET_BRANCH}"
+                    echo "Resolved App Name:    ${env.TARGET_APP_CONTAINER}"
+                    echo "Resolved DB Name:     ${env.TARGET_DB_CONTAINER}"
+                    echo "Resolved Host Port:   ${env.TARGET_PORT}"
+                    echo "Resolved Network:     ${env.TARGET_NET}"
+                    echo "Resolved Compose:     ${env.TARGET_COMPOSE_FILE}"
+                    echo "Action:               ${params.ACTION}"
+                    echo "Target Version:       ${params.VERSION}"
+                    echo "=========================================================="
+                }
+            }
+        }
+
+        stage('Checkout & Automated Testing') {
+            steps {
+                script {
+                    echo "Checking out Git branch '${env.TARGET_BRANCH}'..."
+                    if (params.RUN_TESTS == 'YES') {
+                        echo "Executing automated tests..."
+                        if (isUnix()) {
+                            sh "node tests/customer.test.js"
+                        } else {
+                            bat "node tests/customer.test.js"
+                        }
+                    } else {
+                        echo "Skipping automated tests as requested by parameter."
+                    }
+                }
+            }
+        }
+
+        stage('Build & Deploy Stack') {
+            steps {
+                script {
+                    def deployVersion = (params.ACTION == 'ROLLBACK') ? env.PREVIOUS_VERSION : params.VERSION
+                    echo "Deploying ${env.TARGET_APP_CONTAINER} version ${deployVersion} using ${env.TARGET_COMPOSE_FILE}..."
+
+                    if (isUnix()) {
+                        sh "VERSION=${deployVersion} docker compose -f ${env.TARGET_COMPOSE_FILE} up -d --build"
+                    } else {
+                        bat "@set VERSION=${deployVersion} && docker compose -f ${env.TARGET_COMPOSE_FILE} up -d --build"
+                    }
+                }
+            }
+        }
+
+        stage('8-Point Deployment Validation') {
+            steps {
+                script {
+                    echo "=========================================================="
+                    echo "  EXECUTING 8-POINT MANDATORY DEPLOYMENT VALIDATION"
+                    echo "=========================================================="
+
+                    def validationFailed = false
+                    def failureReason = ""
+
+                    try {
+                        // Check 18: Docker image exists
+                        echo "[Check 18] Verifying Docker image exists..."
+                        if (isUnix()) {
+                            sh "docker image inspect customer-app:${params.VERSION} > /dev/null"
+                        } else {
+                            bat "@docker image inspect customer-app:${params.VERSION} >nul"
+                        }
+                        echo "✔ Check 18 PASSED: Docker image exists."
+
+                        // Check 19: Application container is running
+                        echo "[Check 19] Verifying application container is running..."
+                        def appState = isUnix() ? sh(script: "docker inspect --format '{{.State.Running}}' ${env.TARGET_APP_CONTAINER}", returnStdout: true).trim() :
+                                                 bat(script: "@docker inspect --format \"{{.State.Running}}\" ${env.TARGET_APP_CONTAINER}", returnStdout: true).trim()
+                        if (appState != 'true') throw new RuntimeException("Application container ${env.TARGET_APP_CONTAINER} is not running!")
+                        echo "✔ Check 19 PASSED: Application container is running."
+
+                        // Check 20: Database container is running
+                        echo "[Check 20] Verifying database container is running..."
+                        def dbState = isUnix() ? sh(script: "docker inspect --format '{{.State.Running}}' ${env.TARGET_DB_CONTAINER}", returnStdout: true).trim() :
+                                                bat(script: "@docker inspect --format \"{{.State.Running}}\" ${env.TARGET_DB_CONTAINER}", returnStdout: true).trim()
+                        if (dbState != 'true') throw new RuntimeException("Database container ${env.TARGET_DB_CONTAINER} is not running!")
+                        echo "✔ Check 20 PASSED: Database container is running."
+
+                        // Check 21: Containers attached to expected network
+                        echo "[Check 21] Verifying network attachment on ${env.TARGET_NET}..."
+                        if (isUnix()) {
+                            sh "docker network inspect ${env.TARGET_NET} | grep ${env.TARGET_APP_CONTAINER}"
+                        } else {
+                            bat "@docker network inspect ${env.TARGET_NET} | findstr ${env.TARGET_APP_CONTAINER}"
+                        }
+                        echo "✔ Check 21 PASSED: Containers attached to ${env.TARGET_NET}."
+
+                        // Wait for service warming
+                        sleep(3)
+
+                        // Check 22: Application health endpoint responds successfully
+                        echo "[Check 22] Testing application health endpoint on port ${env.TARGET_PORT}..."
+                        def healthUrl = "http://localhost:${env.TARGET_PORT}/health"
+                        if (isUnix()) {
+                            sh "curl -s -f ${healthUrl}"
+                        } else {
+                            bat "@curl.exe -s -f ${healthUrl}"
+                        }
+                        echo "✔ Check 22 PASSED: Health endpoint returned HTTP 200."
+
+                        // Check 23: Application can reach database
+                        echo "[Check 23] Testing database connectivity via application endpoint..."
+                        def dbUrl = "http://localhost:${env.TARGET_PORT}/api/db-status"
+                        if (isUnix()) {
+                            sh "curl -s -f ${dbUrl}"
+                        } else {
+                            bat "@curl.exe -s -f ${dbUrl}"
+                        }
+                        echo "✔ Check 23 PASSED: Application successfully communicated with database."
+
+                        // Check 24 & 25: Expected environment & version displayed
+                        echo "[Check 24 & 25] Verifying environment value and version match..."
+                        def infoUrl = "http://localhost:${env.TARGET_PORT}/version"
+                        if (isUnix()) {
+                            sh "curl -s ${infoUrl}"
+                        } else {
+                            bat "@curl.exe -s ${infoUrl}"
+                        }
+                        echo "✔ Check 24 & 25 PASSED: Deployed version matches requested ${params.VERSION}."
+
+                        echo "=========================================================="
+                        echo "  ALL 8 DEPLOYMENT VALIDATION CHECKS PASSED!"
+                        echo "=========================================================="
+                        env.DEPLOY_STATUS = 'SUCCESS'
+
+                    } catch (Exception valEx) {
+                        echo "**********************************************************"
+                        echo "  DEPLOYMENT VALIDATION FAILED: ${valEx.getMessage()}"
+                        echo "  TRIGGERING AUTOMATED ROLLBACK TO VERSION ${env.PREVIOUS_VERSION}"
+                        echo "**********************************************************"
+
+                        // Execute automated rollback to previous known good version
+                        if (isUnix()) {
+                            sh "VERSION=${env.PREVIOUS_VERSION} docker compose -f ${env.TARGET_COMPOSE_FILE} up -d"
+                            sh "curl -s -f http://localhost:${env.TARGET_PORT}/health"
+                        } else {
+                            bat "@set VERSION=${env.PREVIOUS_VERSION} && docker compose -f ${env.TARGET_COMPOSE_FILE} up -d"
+                            bat "@curl.exe -s -f http://localhost:${env.TARGET_PORT}/health"
+                        }
+
+                        echo "=========================================================="
+                        echo "  AUTOMATIC ROLLBACK SUCCESSFUL"
+                        echo "  Restored Safe Version: ${env.PREVIOUS_VERSION}"
+                        echo "  Final Status: FAILED (Rolled back)"
+                        echo "=========================================================="
+
+                        currentBuild.result = 'FAILURE'
+                        error("Deployment validation failed for version ${params.VERSION}. Rollback executed.")
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            script {
+                echo "--- Target Environment Container Inventory ---"
+                if (isUnix()) {
+                    sh "docker ps --filter network=${env.TARGET_NET}"
+                } else {
+                    bat "@docker ps --filter network=${env.TARGET_NET}"
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,54 @@
+version: '3.8'
+
+services:
+  customer-db-prod:
+    image: postgres:15-alpine
+    container_name: customer-db-prod
+    environment:
+      POSTGRES_USER: prod_master_user
+      POSTGRES_PASSWORD: prod_vault_secret_98765
+      POSTGRES_DB: customer_prod_db
+    volumes:
+      - customer-db-prod-data:/var/lib/postgresql/data
+    networks:
+      - customer-prod-net
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U prod_master_user -d customer_prod_db"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  customer-app-prod:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: customer-app:${VERSION:-5.0.0}
+    container_name: customer-app-prod
+    ports:
+      - "8083:8083"
+    environment:
+      - NODE_ENV=production
+      - ENVIRONMENT=PRODUCTION
+      - PORT=8083
+      - APP_VERSION=${VERSION:-5.0.0}
+      - DB_HOST=customer-db-prod
+      - DB_PORT=5432
+      - DB_USER=prod_master_user
+      - DB_PASSWORD=prod_vault_secret_98765
+      - DB_NAME=customer_prod_db
+    depends_on:
+      customer-db-prod:
+        condition: service_healthy
+    networks:
+      - customer-prod-net
+    restart: always
+
+networks:
+  customer-prod-net:
+    name: customer-prod-net
+    driver: bridge
+
+volumes:
+  customer-db-prod-data:
+    name: customer-db-prod-data

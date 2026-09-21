@@ -1,0 +1,10 @@
+{
+  "name": "customer-service",
+  "version": "5.0.0",
+  "description": "Customer Search & Management Microservice for Multi-Environment CI/CD",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node tests/customer.test.js"
+  }
+}
